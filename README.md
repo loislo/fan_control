@@ -193,8 +193,9 @@ The script monitors:
 
 1. **Root Privileges**: Automatic control requires `sudo` to write to `/sys/class/hwmon/`
 2. **Fan Stall Prevention**: The default minimum is 10/255 (~4%). Adjust if your fans stall at low speeds
-3. **Exit Behavior**: When you stop the script (Ctrl+C), fans stay at their current speed
-4. **BIOS Override**: To restore BIOS control, reboot or manually set PWM enable to auto mode
+3. **Exit Behavior**: When you stop the script (Ctrl+C or Q), BIOS control is automatically restored
+4. **Crash Protection**: The script uses a try/finally block to restore BIOS control even if it crashes
+5. **Automatic Restoration**: All PWM channels are set back to auto mode (BIOS control) when the script exits
 
 ## Examples
 

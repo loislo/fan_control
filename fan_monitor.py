@@ -215,6 +215,26 @@ class FanController:
         enable_path = self.hwmon_path / f"pwm{pwm_num}_enable"
         return self.write_file(enable_path, "1")
 
+    def restore_bios_control(self, pwm_num: int) -> bool:
+        """Restore BIOS/automatic control for a PWM channel"""
+        enable_path = self.hwmon_path / f"pwm{pwm_num}_enable"
+        return self.write_file(enable_path, "2")
+
+    def restore_all_bios_control(self):
+        """Restore BIOS/automatic control for all PWM channels"""
+        print("\n🔄 Restoring BIOS control for all fans...")
+        success_count = 0
+        for i in range(1, self.num_pwms + 1):
+            if self.restore_bios_control(i):
+                success_count += 1
+            else:
+                print(f"Warning: Could not restore BIOS control for PWM{i}")
+
+        if success_count == self.num_pwms:
+            print(f"✓ Successfully restored BIOS control for all {self.num_pwms} PWM channels")
+        else:
+            print(f"⚠ Restored BIOS control for {success_count}/{self.num_pwms} PWM channels")
+
     def set_pwm_value(self, pwm_num: int, value: int) -> bool:
         """Set PWM value (0-255)"""
         if not 0 <= value <= 255:
@@ -425,71 +445,72 @@ class FanController:
 
         time.sleep(1)
 
-        with KeyboardHandler() as kb:
-            try:
-                first_iteration = True
-                last_update = time.time()
-                force_update = False
-                iteration_count = 0
+        try:
+            with KeyboardHandler() as kb:
+                try:
+                    first_iteration = True
+                    last_update = time.time()
+                    force_update = False
+                    iteration_count = 0
 
-                while True:
-                    current_time = time.time()
+                    while True:
+                        current_time = time.time()
 
-                    # Check for keyboard input
-                    key = kb.get_key(timeout=0.05)
-                    if key:
-                        if key in ('q', 'Q'):
-                            break
-                        elif key in ('w', 'W', 'UP'):
-                            self.manual_pwm_offset = min(self.manual_pwm_offset + 10, 255)
-                            force_update = True
-                        elif key in ('s', 'S', 'DOWN'):
-                            self.manual_pwm_offset = max(self.manual_pwm_offset - 10, -255)
-                            force_update = True
+                        # Check for keyboard input
+                        key = kb.get_key(timeout=0.05)
+                        if key:
+                            if key in ('q', 'Q'):
+                                break
+                            elif key in ('w', 'W', 'UP'):
+                                self.manual_pwm_offset = min(self.manual_pwm_offset + 10, 255)
+                                force_update = True
+                            elif key in ('s', 'S', 'DOWN'):
+                                self.manual_pwm_offset = max(self.manual_pwm_offset - 10, -255)
+                                force_update = True
 
-                    # Update display at intervals or when forced
-                    if force_update or current_time - last_update >= interval:
-                        # Get maximum temperature
-                        temps = self.get_temperatures()
-                        if not temps:
-                            print("No temperature readings available!")
-                            time.sleep(interval)
-                            continue
+                        # Update display at intervals or when forced
+                        if force_update or current_time - last_update >= interval:
+                            # Get maximum temperature
+                            temps = self.get_temperatures()
+                            if not temps:
+                                print("No temperature readings available!")
+                                time.sleep(interval)
+                                continue
 
-                        max_temp = max(temps.values())
+                            max_temp = max(temps.values())
 
-                        # Calculate PWM value with manual offset
-                        base_pwm = self.calculate_pwm_from_temp(max_temp)
-                        pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
+                            # Calculate PWM value with manual offset
+                            base_pwm = self.calculate_pwm_from_temp(max_temp)
+                            pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
 
-                        # Set all PWM channels
-                        for i in range(1, self.num_pwms + 1):
-                            self.set_pwm_value(i, pwm_value)
+                            # Set all PWM channels
+                            for i in range(1, self.num_pwms + 1):
+                                self.set_pwm_value(i, pwm_value)
 
-                        # Build control info
-                        control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
-                        if self.manual_pwm_offset != 0:
-                            control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
-                        else:
-                            control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
-                        control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
+                            # Build control info
+                            control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
+                            if self.manual_pwm_offset != 0:
+                                control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            else:
+                                control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
 
-                        # Display status (clear screen after first iteration)
-                        self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
-                        first_iteration = False
-                        last_update = current_time
-                        force_update = False
-                        iteration_count += 1
+                            # Display status (clear screen after first iteration)
+                            self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
+                            first_iteration = False
+                            last_update = current_time
+                            force_update = False
+                            iteration_count += 1
 
-                        # Check if we've reached max iterations
-                        if max_iterations and iteration_count >= max_iterations:
-                            break
+                            # Check if we've reached max iterations
+                            if max_iterations and iteration_count >= max_iterations:
+                                break
 
-            except KeyboardInterrupt:
-                pass
-
-        print("\n\n⚠️  Stopping automatic control...")
-        print("Fans will remain at current speed. Set to auto mode in BIOS if needed.")
+                except KeyboardInterrupt:
+                    print("\n\n⚠️  Interrupted by user...")
+        finally:
+            # Always restore BIOS control when exiting, even if there was an error
+            self.restore_all_bios_control()
 
 
 def get_config_path():
