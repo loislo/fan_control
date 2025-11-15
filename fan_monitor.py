@@ -416,8 +416,8 @@ class FanController:
 
             # Calculate graph width to match separator width
             # Need room for: "  100.0 │" (9 chars) + graph + "│" (1 char) = 10 + graph
+            # Don't limit by history_size - create_vertical_bars will compress data to fit
             graph_width = sep_width - 10
-            graph_width = min(self.history_size, graph_width)
 
             # Temperature history
             temp_min = min(self.temp_history)
