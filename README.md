@@ -15,7 +15,8 @@ A Python script for monitoring and automatically controlling system fans on Linu
 - 🌀 Fan speed monitoring (RPM)
 - ⚙️ PWM control status display
 - 🤖 Automatic fan control based on temperature curves
-- 📈 Visual progress bars and history graphs
+- 📈 Visual progress bars and history graphs with color coding
+- 🎨 Color-coded bars (green=low, yellow=medium, red=high)
 - ⌨️ Interactive keyboard controls (W/S to adjust fan speed, Q to quit)
 - 📝 Plain text configuration file with easy editing
 
