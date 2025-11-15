@@ -11,6 +11,7 @@ import argparse
 import select
 import termios
 import tty
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import deque
@@ -91,6 +92,13 @@ class FanController:
 
         # Manual control
         self.manual_pwm_offset = 0  # Offset from auto value for manual adjustment
+
+        # Terminal size detection
+        try:
+            terminal_size = shutil.get_terminal_size(fallback=(140, 40))
+            self.term_width = terminal_size.columns
+        except:
+            self.term_width = 140  # Default fallback
 
         # ANSI color codes
         self.COLOR_GREEN = '\033[92m'
@@ -338,19 +346,35 @@ class FanController:
         if show_history:
             self.record_history(max_temp, avg_fan_speed)
 
+        # Calculate display widths based on terminal size
+        sep_width = min(self.term_width, 140)
+
+        # Calculate bar widths dynamically to fill the terminal width
+        # Temperature format: "  {name:12s}: {temp:5.1f}°C  [{bar}]"
+        # Fixed parts: 2 + 12 + 2 + 5 + 2 + 2 + 1 + 1 = 27 chars
+        temp_bar_width = max(20, sep_width - 27)
+
+        # Fan speed format: "  {name:12s}: {rpm:4d} RPM  [{bar}]"
+        # Fixed parts: 2 + 12 + 2 + 4 + 4 + 2 + 1 + 1 = 28 chars
+        fan_bar_width = max(20, sep_width - 28)
+
+        # PWM format: "  {name:12s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]"
+        # Fixed parts: 2 + 12 + 2 + 3 + 4 + 2 + 5 + 3 + 2 + 1 + 1 = 37 chars
+        pwm_bar_width = max(20, sep_width - 37)
+
         # Build output
-        output.append("\n" + "=" * 70)
+        output.append("\n" + "=" * sep_width)
         output.append("SYSTEM MONITORING")
-        output.append("=" * 70)
+        output.append("=" * sep_width)
 
         # Display temperatures
         output.append("\n📊 TEMPERATURES:")
-        output.append("-" * 70)
+        output.append("-" * sep_width)
 
         for name, temp in sorted(temps.items()):
-            bar_length = int(temp / 100 * 40)
+            bar_length = int(temp / 100 * temp_bar_width)
             color = self.get_temp_color(temp)
-            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (40 - bar_length)
+            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (temp_bar_width - bar_length)
             output.append(f"  {name:12s}: {temp:5.1f}°C  [{bar}]")
 
         max_temp_color = self.get_temp_color(max_temp)
@@ -358,12 +382,12 @@ class FanController:
 
         # Display fan speeds
         output.append("\n🌀 FAN SPEEDS:")
-        output.append("-" * 70)
+        output.append("-" * sep_width)
 
         for name, rpm in sorted(speeds.items()):
-            bar_length = int(min(rpm / 3000 * 40, 40))
+            bar_length = int(min(rpm / 3000 * fan_bar_width, fan_bar_width))
             color = self.get_fan_color(rpm, 3000)
-            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (40 - bar_length)
+            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (fan_bar_width - bar_length)
             output.append(f"  {name:12s}: {rpm:4d} RPM  [{bar}]")
 
         avg_color = self.get_fan_color(avg_fan_speed, 3000)
@@ -371,10 +395,10 @@ class FanController:
 
         # Display PWM values
         output.append("\n⚙️  PWM CONTROLS:")
-        output.append("-" * 70)
+        output.append("-" * sep_width)
 
         for name, (value, percent, mode, enable) in sorted(pwm_info.items()):
-            bar_length = int(percent / 100 * 40)
+            bar_length = int(percent / 100 * pwm_bar_width)
             # Color based on PWM percentage (similar to fan speed)
             if percent < 40:
                 color = self.COLOR_GREEN
@@ -382,44 +406,50 @@ class FanController:
                 color = self.COLOR_YELLOW
             else:
                 color = self.COLOR_RED
-            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (40 - bar_length)
-            output.append(f"  {name:12s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]  {mode:3s} {enable}")
+            bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (pwm_bar_width - bar_length)
+            output.append(f"  {name:12s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]")
 
         # Display history graphs
         if show_history and len(self.temp_history) > 1:
             output.append("\n📈 HISTORY:")
-            output.append("-" * 70)
+            output.append("-" * sep_width)
+
+            # Calculate graph width to match separator width
+            # Need room for: "  100.0 │" (9 chars) + graph + "│" (1 char) = 10 + graph
+            graph_width = sep_width - 10
+            graph_width = min(self.history_size, graph_width)
 
             # Temperature history
             temp_min = min(self.temp_history)
             temp_max_val = max(self.temp_history)
-            temp_bars = self.create_vertical_bars(self.temp_history, 100.0, width=60, height=8, is_temp=True)
+            temp_bars = self.create_vertical_bars(self.temp_history, 100.0, width=graph_width, height=8, is_temp=True)
             temp_color = self.get_temp_color(max_temp)
             output.append(f"  Temperature (°C)  Max: {temp_max_val:.1f}  Min: {temp_min:.1f}  Current: {temp_color}{max_temp:.1f}{self.COLOR_RESET}")
             for i, line in enumerate(temp_bars):
                 value = 100.0 * (8 - i) / 8
                 output.append(f"  {value:5.1f} │{line}│")
-            output.append(f"    0.0 └{'─' * 60}┘")
-            output.append(f"        Last {len(self.temp_history)} samples")
+            output.append(f"    0.0 └{'─' * graph_width}┘")
+
+            output.append("")  # Blank line between graphs
 
             # Fan speed history
             fan_min = min(self.fan_history)
             fan_max_val = max(self.fan_history)
-            fan_bars = self.create_vertical_bars(self.fan_history, 3000.0, width=60, height=8, is_temp=False)
+            fan_bars = self.create_vertical_bars(self.fan_history, 3000.0, width=graph_width, height=8, is_temp=False)
             fan_color = self.get_fan_color(avg_fan_speed, 3000)
-            output.append(f"\n  Fan Speed (RPM)   Max: {fan_max_val:.0f}  Min: {fan_min:.0f}  Current: {fan_color}{avg_fan_speed:.0f}{self.COLOR_RESET}")
+            output.append(f"  Fan Speed (RPM)   Max: {fan_max_val:.0f}  Min: {fan_min:.0f}  Current: {fan_color}{avg_fan_speed:.0f}{self.COLOR_RESET}")
             for i, line in enumerate(fan_bars):
                 value = 3000.0 * (8 - i) / 8
                 output.append(f"  {value:5.0f} │{line}│")
-            output.append(f"      0 └{'─' * 60}┘")
-            output.append(f"        Last {len(self.fan_history)} samples")
+            output.append(f"      0 └{'─' * graph_width}┘")
+            output.append(f"        Last {len(self.temp_history)} samples")
 
         # Control information
         if control_info:
             output.append("")
             output.append(control_info)
 
-        output.append("=" * 70)
+        output.append("=" * sep_width)
 
         # Clear and print all at once
         if clear:
