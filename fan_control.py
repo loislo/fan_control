@@ -806,10 +806,13 @@ class FanController:
 
         return max_temp
 
-    def auto_control(self, interval: float = 2.0, max_iterations: int = None):
+    def auto_control(self, interval: float = 2.0, max_iterations: int = None, force_daemon: bool = False):
         """Automatically control fans based on temperature"""
+        # Determine if we're in interactive mode
+        is_interactive = sys.stdout.isatty() and not force_daemon
+
         # Only show interactive messages if we have a terminal
-        if sys.stdout.isatty():
+        if is_interactive:
             print("\n🤖 AUTOMATIC FAN CONTROL ENABLED")
             print(f"Temperature range: {self.temp_min}°C - {self.temp_max}°C")
             print(f"PWM range: {self.pwm_min}/255 ({self.pwm_min/255*100:.1f}%) - {self.pwm_max}/255 ({self.pwm_max/255*100:.1f}%)")
@@ -818,11 +821,11 @@ class FanController:
             print("\nControls: [Q]uit  [W]Increase  [S]Decrease fan speed\n")
 
         # Set all PWM channels to manual mode
-        if sys.stdout.isatty():
+        if is_interactive:
             print("Setting PWM channels to manual mode...")
         for pwm_path, enable_path, _, label in self.pwm_controls:
             if not self.set_pwm_manual_mode(pwm_path, enable_path):
-                if sys.stdout.isatty():
+                if is_interactive:
                     print(f"Warning: Could not set {label} to manual mode")
 
         time.sleep(1)
@@ -831,65 +834,65 @@ class FanController:
             with KeyboardHandler() as kb:
                 try:
                     first_iteration = True
-                    last_update = time.time()
-                    force_update = False
                     iteration_count = 0
 
                     while True:
-                        current_time = time.time()
+                        # Get maximum temperature from control sensors (CPU cores + GPU)
+                        control_temps = self.get_control_temperatures()
+                        if not control_temps:
+                            print("No control temperature readings available!")
+                            time.sleep(interval)
+                            continue
 
-                        # Check for keyboard input
-                        key = kb.get_key(timeout=0.05)
-                        if key:
-                            if key in ('q', 'Q'):
-                                break
-                            elif key in ('w', 'W', 'UP'):
-                                self.manual_pwm_offset = min(self.manual_pwm_offset + 10, 255)
-                                force_update = True
-                            elif key in ('s', 'S', 'DOWN'):
-                                self.manual_pwm_offset = max(self.manual_pwm_offset - 10, -255)
-                                force_update = True
+                        max_temp = max(control_temps.values())
 
-                        # Update display at intervals or when forced
-                        if force_update or current_time - last_update >= interval:
-                            # Get maximum temperature from control sensors (CPU cores + GPU)
-                            control_temps = self.get_control_temperatures()
-                            if not control_temps:
-                                print("No control temperature readings available!")
-                                time.sleep(interval)
-                                continue
+                        # Calculate PWM value with manual offset
+                        base_pwm = self.calculate_pwm_from_temp(max_temp)
+                        pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
 
-                            max_temp = max(control_temps.values())
+                        # Set all PWM channels
+                        for pwm_path, enable_path, _, label in self.pwm_controls:
+                            self.set_pwm_value(pwm_path, pwm_value)
 
-                            # Calculate PWM value with manual offset
-                            base_pwm = self.calculate_pwm_from_temp(max_temp)
-                            pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
-
-                            # Set all PWM channels
-                            for pwm_path, enable_path, _, label in self.pwm_controls:
-                                self.set_pwm_value(pwm_path, pwm_value)
-
-                            # Display status or log to console
-                            if sys.stdout.isatty():
-                                # Interactive mode: fancy display
-                                control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
-                                if self.manual_pwm_offset != 0:
-                                    control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
-                                else:
-                                    control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
-                                control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
-                                self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
+                        # Display status or log to console
+                        if is_interactive:
+                            # Interactive mode: fancy display
+                            control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
+                            if self.manual_pwm_offset != 0:
+                                control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
                             else:
-                                # Daemon mode: simple status output
-                                print(f"Fan control active: Max temp {max_temp:.1f}°C → PWM {pwm_value}/255 ({pwm_value/255*100:.1f}%)", flush=True)
-                            first_iteration = False
-                            last_update = current_time
-                            force_update = False
-                            iteration_count += 1
+                                control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
+                            self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
+                        else:
+                            # Daemon mode: simple status output
+                            print(f"Fan control active: Max temp {max_temp:.1f}°C → PWM {pwm_value}/255 ({pwm_value/255*100:.1f}%)", flush=True)
 
-                            # Check if we've reached max iterations
-                            if max_iterations and iteration_count >= max_iterations:
-                                break
+                        first_iteration = False
+                        iteration_count += 1
+
+                        # Check if we've reached max iterations
+                        if max_iterations and iteration_count >= max_iterations:
+                            break
+
+                        # Sleep and handle keyboard input based on mode
+                        if is_interactive:
+                            # Interactive mode: check for keyboard input during sleep
+                            sleep_start = time.time()
+                            while time.time() - sleep_start < interval:
+                                key = kb.get_key(timeout=0.05)
+                                if key:
+                                    if key in ('q', 'Q'):
+                                        return  # Exit cleanly
+                                    elif key in ('w', 'W', 'UP'):
+                                        self.manual_pwm_offset = min(self.manual_pwm_offset + 10, 255)
+                                        break  # Force immediate update
+                                    elif key in ('s', 'S', 'DOWN'):
+                                        self.manual_pwm_offset = max(self.manual_pwm_offset - 10, -255)
+                                        break  # Force immediate update
+                        else:
+                            # Daemon mode: just sleep for the full interval (no keyboard checking)
+                            time.sleep(interval)
 
                 except KeyboardInterrupt:
                     print("\n\n⚠️  Interrupted by user...")
@@ -1046,6 +1049,8 @@ def main():
                        help='Test PWM channel responsiveness in current mode (requires root)')
     parser.add_argument('--test-pwm-full', action='store_true',
                        help='Test PWM channel responsiveness in both PWM and DC modes (requires root, takes longer)')
+    parser.add_argument('--daemon', action='store_true',
+                       help='Force daemon mode output (simple text, no fancy UI) - for testing')
 
     args = parser.parse_args()
 
@@ -1102,7 +1107,7 @@ def main():
 
     if args.auto:
         # Root user with --auto flag: control fans
-        controller.auto_control(interval=interval, max_iterations=args.iterations)
+        controller.auto_control(interval=interval, max_iterations=args.iterations, force_daemon=args.daemon)
     elif args.watch:
         if args.iterations:
             print(f"Controls: [Q]uit to stop | Test mode: Running for {args.iterations} iterations\n")
