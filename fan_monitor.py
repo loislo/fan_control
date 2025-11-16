@@ -248,9 +248,8 @@ class FanController:
             if value:
                 try:
                     rpm = int(value)
-                    # Skip invalid readings (0 RPM often means disconnected fan)
-                    if rpm > 0:
-                        speeds[label] = rpm
+                    # Include 0 RPM - fan could be stopped due to low temp/PWM
+                    speeds[label] = rpm
                 except (ValueError, TypeError):
                     pass  # Skip invalid values
 
