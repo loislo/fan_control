@@ -75,7 +75,7 @@ class KeyboardHandler:
 class FanController:
     """Controls and monitors system fans and temperatures"""
 
-    def __init__(self, hwmon_path: str = "/sys/class/hwmon/hwmon3", history_size: int = 60):
+    def __init__(self, hwmon_path: str = "/sys/class/hwmon/hwmon3", history_size: int = 300):
         self.hwmon_path = Path(hwmon_path)
 
         # Temperature control curve parameters
@@ -85,6 +85,7 @@ class FanController:
         self.pwm_max = 255    # Maximum PWM value (0-255) 100%
 
         # History tracking
+        # Large enough to handle ultra-wide terminals (graph width auto-scales)
         self.history_size = history_size
         self.temp_history = deque(maxlen=history_size)
         self.fan_history = deque(maxlen=history_size)
@@ -145,7 +146,7 @@ class FanController:
             name_file = hwmon_dir / "name"
             device_name = self.read_file(name_file) if name_file.exists() else hwmon_dir.name
 
-            # Detect temperature sensors
+            # Detect temperature sensors - all devices for display
             for temp_file in sorted(hwmon_dir.glob("temp*_input")):
                 # Get label if available
                 label_file = temp_file.parent / temp_file.name.replace("_input", "_label")
@@ -156,7 +157,18 @@ class FanController:
                     temp_num = temp_file.name.replace("temp", "").replace("_input", "")
                     label = f"{device_name}_temp{temp_num}"
 
-                self.temp_sensors.append((temp_file, label))
+                # Skip invalid sensors (check current reading)
+                value = self.read_file(temp_file)
+                if value:
+                    try:
+                        temp_c = int(value) / 1000.0
+                        # Skip sensors with unrealistic values
+                        if temp_c <= 0 or temp_c > 120:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+
+                self.temp_sensors.append((temp_file, label, device_name))
 
             # Detect fan sensors
             for fan_file in sorted(hwmon_dir.glob("fan*_input")):
@@ -197,7 +209,7 @@ class FanController:
             if result.returncode == 0 and result.stdout.strip():
                 # Add GPU as a virtual temperature sensor
                 gpu_name = result.stdout.strip().split(',')[0].strip()
-                self.temp_sensors.append(("nvidia-smi", gpu_name))
+                self.temp_sensors.append(("nvidia-smi", gpu_name, "nvidia"))
         except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
             pass  # NVIDIA tools not available or GPU not present
 
@@ -210,7 +222,7 @@ class FanController:
         """Get all available temperature sensors"""
         temps = {}
 
-        for sensor_path, label in self.temp_sensors:
+        for sensor_path, label, device_name in self.temp_sensors:
             # Handle NVIDIA GPU specially
             if sensor_path == "nvidia-smi":
                 try:
@@ -238,6 +250,51 @@ class FanController:
                         pass  # Skip invalid values
 
         return temps
+
+    def get_control_temperatures(self) -> Dict[str, float]:
+        """Get temperatures for PWM control (CPU cores + GPU only)"""
+        temps = {}
+
+        for sensor_path, label, device_name in self.temp_sensors:
+            # Only include coretemp (CPU cores/package) and nvidia (GPU)
+            if device_name not in ['coretemp', 'nvidia']:
+                continue
+
+            # Handle NVIDIA GPU specially
+            if sensor_path == "nvidia-smi":
+                try:
+                    result = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        temp = float(result.stdout.strip())
+                        temps[label] = temp
+                except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, Exception):
+                    pass  # GPU temp unavailable
+            else:
+                # Regular sysfs sensor
+                value = self.read_file(sensor_path)
+                if value:
+                    try:
+                        temp_c = int(value) / 1000.0
+                        # Skip invalid readings
+                        if 0 < temp_c < 120:
+                            temps[label] = temp_c
+                    except (ValueError, TypeError):
+                        pass  # Skip invalid values
+
+        return temps
+
+    def get_control_sensor_names(self) -> set:
+        """Get names of sensors used for PWM control"""
+        control_names = set()
+        for sensor_path, label, device_name in self.temp_sensors:
+            if device_name in ['coretemp', 'nvidia']:
+                control_names.add(label)
+        return control_names
 
     def get_fan_speeds(self) -> Dict[str, int]:
         """Get current fan speeds in RPM"""
@@ -380,26 +437,18 @@ class FanController:
         if not data:
             return ["░" * width] * height
 
-        # Prepare data - average if we have more points than width
-        data_points = len(data)
-        display_data = []
+        # Show only the most recent 'width' samples to match graph size
+        data_list = list(data)
+        data_points = len(data_list)
 
         if data_points <= width:
-            # Show each point
-            display_data = list(data)
+            # Show all available data
+            display_data = data_list
             # Pad with zeros if needed
             display_data.extend([0] * (width - len(display_data)))
         else:
-            # Average multiple points per column
-            points_per_col = data_points / width
-            for i in range(width):
-                start_idx = int(i * points_per_col)
-                end_idx = int((i + 1) * points_per_col)
-                chunk = list(data)[start_idx:end_idx]
-                if chunk:
-                    display_data.append(sum(chunk) / len(chunk))
-                else:
-                    display_data.append(0)
+            # Show only the most recent 'width' samples
+            display_data = data_list[-width:]
 
         # Create the vertical bars with colors
         lines = []
@@ -437,7 +486,9 @@ class FanController:
         temps = self.get_temperatures()
         speeds = self.get_fan_speeds()
         pwm_info = self.get_pwm_values()
-        max_temp = max(temps.values()) if temps else 0
+        # Use control temperatures (CPU cores + GPU) for max temp calculation
+        control_temps = self.get_control_temperatures()
+        max_temp = max(control_temps.values()) if control_temps else 0
         avg_fan_speed = sum(speeds.values()) / len(speeds) if speeds else 0
 
         # Record history
@@ -474,11 +525,19 @@ class FanController:
         output.append("\n📊 TEMPERATURES:")
         output.append("-" * sep_width)
 
+        # Get control sensor names for highlighting
+        control_sensors = self.get_control_sensor_names()
+
         for name, temp in sorted(temps.items()):
             bar_length = int(temp / 100 * temp_bar_width)
             color = self.get_temp_color(temp)
             bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (temp_bar_width - bar_length)
-            output.append(f"  {name:{max_temp_label}s}: {temp:5.1f}°C  [{bar}]")
+            # Highlight control sensors with cyan color
+            if name in control_sensors:
+                name_display = f"{self.COLOR_CYAN}{name}{self.COLOR_RESET}"
+                output.append(f"  {name_display:{max_temp_label + len(self.COLOR_CYAN) + len(self.COLOR_RESET)}s}: {temp:5.1f}°C  [{bar}]")
+            else:
+                output.append(f"  {name:{max_temp_label}s}: {temp:5.1f}°C  [{bar}]")
 
         max_temp_color = self.get_temp_color(max_temp)
         output.append(f"\n  {'Max Temp':{max_temp_label}s}: {max_temp_color}{max_temp:5.1f}°C{self.COLOR_RESET}")
@@ -605,14 +664,14 @@ class FanController:
 
                         # Update display at intervals or when forced
                         if force_update or current_time - last_update >= interval:
-                            # Get maximum temperature
-                            temps = self.get_temperatures()
-                            if not temps:
-                                print("No temperature readings available!")
+                            # Get maximum temperature from control sensors (CPU cores + GPU)
+                            control_temps = self.get_control_temperatures()
+                            if not control_temps:
+                                print("No control temperature readings available!")
                                 time.sleep(interval)
                                 continue
 
-                            max_temp = max(temps.values())
+                            max_temp = max(control_temps.values())
 
                             # Calculate PWM value with manual offset
                             base_pwm = self.calculate_pwm_from_temp(max_temp)
@@ -675,7 +734,8 @@ pwm_max = 255
 interval = 2.0
 
 # History size (number of samples to keep)
-history_size = 60
+# Large enough to fill ultra-wide terminals
+history_size = 300
 """
 
 
@@ -688,7 +748,7 @@ def load_config():
         'temp_max': 80.0,
         'pwm_min': 10,
         'pwm_max': 255,
-        'history_size': 60,
+        'history_size': 300,
         'hwmon_path': '/sys/class/hwmon/hwmon3'
     }
 
@@ -752,7 +812,8 @@ pwm_max = {config.get('pwm_max', 255)}
 interval = {config.get('interval', 2.0)}
 
 # History size (number of samples to keep)
-history_size = {config.get('history_size', 60)}
+# Large enough to fill ultra-wide terminals
+history_size = {config.get('history_size', 300)}
 """
         with open(config_path, 'w') as f:
             f.write(content)
