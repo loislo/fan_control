@@ -90,13 +90,13 @@ nano ~/.config/fan_control/fan_control.conf
 **Method 2: Use the `set` command**
 ```bash
 # Update temperature range and save to config
-./fan_monitor.py set --temp-min 40 --temp-max 75
+./fan_control.py set --temp-min 40 --temp-max 75
 
 # Update PWM limits and save to config
-./fan_monitor.py set --pwm-min 20 --pwm-max 255
+./fan_control.py set --pwm-min 20 --pwm-max 255
 
 # Update multiple settings at once
-./fan_monitor.py set --temp-min 40 --temp-max 75 --pwm-min 20 --interval 1.0
+./fan_control.py set --temp-min 40 --temp-max 75 --pwm-min 20 --interval 1.0
 ```
 
 The `set` command saves the specified flags to the config file for future use.
@@ -110,16 +110,16 @@ The `set` command saves the specified flags to the config file for future use.
 **Example:**
 ```bash
 # Uses config values (temp_min=45, temp_max=80)
-./fan_monitor.py --watch
+./fan_control.py --watch
 
 # Override temp range for this run only (config unchanged)
-./fan_monitor.py --watch --temp-min 40 --temp-max 70
+./fan_control.py --watch --temp-min 40 --temp-max 70
 
 # Permanently change config
-./fan_monitor.py set --temp-min 40 --temp-max 70
+./fan_control.py set --temp-min 40 --temp-max 70
 
 # Now uses new config values
-./fan_monitor.py --watch
+./fan_control.py --watch
 ```
 
 ## Usage
@@ -133,7 +133,7 @@ The script automatically adapts its behavior based on user privileges:
 ### 1. Automatic Fan Control (Default for Root)
 
 ```bash
-sudo ./fan_monitor.py
+sudo ./fan_control.py
 ```
 
 When run as root without flags, automatically controls fans based on temperature.
@@ -142,9 +142,9 @@ This is the recommended way to run the script for active cooling management.
 ### 2. Monitoring Mode Only (Watch)
 
 ```bash
-./fan_monitor.py --watch
+./fan_control.py --watch
 # Or for root users who only want to monitor:
-sudo ./fan_monitor.py --watch
+sudo ./fan_control.py --watch
 ```
 
 Updates the display every 2 seconds. Press **Q** to quit.
@@ -156,7 +156,7 @@ Updates the display every 2 seconds. Press **Q** to quit.
 ### 3. Explicit Auto Control Mode
 
 ```bash
-sudo ./fan_monitor.py --auto
+sudo ./fan_control.py --auto
 ```
 
 Explicitly enable automatic fan control (same as running without flags as root).
@@ -170,7 +170,7 @@ The script uses the **maximum temperature** from all sensors to determine fan sp
 ### 4. Custom Temperature Curve
 
 ```bash
-sudo ./fan_monitor.py --auto --temp-min 40 --temp-max 75 --pwm-min 80 --pwm-max 255
+sudo ./fan_control.py --auto --temp-min 40 --temp-max 75 --pwm-min 80 --pwm-max 255
 ```
 
 This example:
@@ -182,7 +182,7 @@ This example:
 ### 5. Custom Update Interval
 
 ```bash
-./fan_monitor.py --watch --interval 5
+./fan_control.py --watch --interval 5
 ```
 
 Updates every 5 seconds instead of the default 2 seconds.
@@ -191,7 +191,7 @@ Updates every 5 seconds instead of the default 2 seconds.
 
 **Quick Test (Current Mode Only)**
 ```bash
-sudo ./fan_monitor.py --test-pwm
+sudo ./fan_control.py --test-pwm
 ```
 
 Tests each PWM channel in its current BIOS-configured mode (PWM or DC). Takes ~8 seconds per channel.
@@ -202,7 +202,7 @@ Tests each PWM channel in its current BIOS-configured mode (PWM or DC). Takes ~8
 
 **Comprehensive Test (Both Modes)**
 ```bash
-sudo ./fan_monitor.py --test-pwm-full
+sudo ./fan_control.py --test-pwm-full
 ```
 
 Tests each channel in both PWM and DC modes to detect optimal configuration. Takes ~16 seconds per channel.
@@ -286,17 +286,17 @@ Sensors highlighted in **cyan** are used for PWM control. All other sensors are 
 
 ### Silent Operation (Low Temps)
 ```bash
-sudo ./fan_monitor.py --auto --temp-min 50 --temp-max 85 --pwm-min 40
+sudo ./fan_control.py --auto --temp-min 50 --temp-max 85 --pwm-min 40
 ```
 
 ### Aggressive Cooling
 ```bash
-sudo ./fan_monitor.py --auto --temp-min 35 --temp-max 70 --pwm-min 100
+sudo ./fan_control.py --auto --temp-min 35 --temp-max 70 --pwm-min 100
 ```
 
 ### Monitor Only (No Control)
 ```bash
-./fan_monitor.py --watch --interval 1
+./fan_control.py --watch --interval 1
 ```
 
 ## Troubleshooting
@@ -304,7 +304,7 @@ sudo ./fan_monitor.py --auto --temp-min 35 --temp-max 70 --pwm-min 100
 ### Permission Denied Errors
 Use `sudo` for automatic control:
 ```bash
-sudo ./fan_monitor.py --auto
+sudo ./fan_control.py --auto
 ```
 
 ### Fans Not Responding
@@ -330,18 +330,18 @@ For system-wide installation:
 
 ```bash
 # 1. Install the script to system location
-sudo cp fan_monitor.py /usr/local/bin/
-sudo chmod +x /usr/local/bin/fan_monitor.py
+sudo cp fan_control.py /usr/local/bin/
+sudo chmod +x /usr/local/bin/fan_control.py
 
 # 2. Run once to create default config in ~/.config/fan_control/
-/usr/local/bin/fan_monitor.py --watch --iterations 1
+/usr/local/bin/fan_control.py --watch --iterations 1
 
 # 3. (Optional) Create system-wide config
 sudo mkdir -p /etc/fan_control
 sudo cp ~/.config/fan_control/fan_control.conf /etc/fan_control/
 
 # 4. Test the installation
-sudo /usr/local/bin/fan_monitor.py --test-pwm
+sudo /usr/local/bin/fan_control.py --test-pwm
 ```
 
 ### Running at Startup (systemd service)

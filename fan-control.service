@@ -5,7 +5,7 @@ Documentation=https://github.com/loislo/fan_control
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/fan_monitor.py --auto
+ExecStart=/usr/local/bin/fan_control.py --auto
 Restart=on-failure
 RestartSec=10s
 
