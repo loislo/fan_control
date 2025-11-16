@@ -120,13 +120,14 @@ class FanController:
         except (FileNotFoundError, PermissionError) as e:
             return None
 
-    def write_file(self, path: Path, value: str) -> bool:
+    def write_file(self, path: Path, value: str, silent: bool = False) -> bool:
         """Write a value to a sysfs file"""
         try:
             path.write_text(value)
             return True
         except (FileNotFoundError, PermissionError, OSError) as e:
-            print(f"Error writing to {path}: {e}")
+            if not silent:
+                print(f"Error writing to {path}: {e}")
             return False
 
     def _detect_hardware(self):
@@ -192,11 +193,12 @@ class FanController:
 
                     pwm_num = pwm_file.name.replace("pwm", "")
                     enable_file = pwm_file.parent / f"pwm{pwm_num}_enable"
+                    mode_file = pwm_file.parent / f"pwm{pwm_num}_mode"
 
                     # Only add if enable file exists (means it's controllable)
                     if enable_file.exists():
                         label = f"PWM{pwm_num}"
-                        self.pwm_controls.append((pwm_file, enable_file, label))
+                        self.pwm_controls.append((pwm_file, enable_file, mode_file, label))
 
         # Check for NVIDIA GPU
         try:
@@ -217,6 +219,187 @@ class FanController:
         print(f"🔍 Detected {len(self.temp_sensors)} temperature sensor(s)")
         print(f"🔍 Detected {len(self.fan_sensors)} fan sensor(s)")
         print(f"🔍 Detected {len(self.pwm_controls)} PWM control(s)")
+
+    def test_pwm_responsiveness(self, comprehensive: bool = False):
+        """Test which PWM channels actually control responsive fans and detect optimal mode
+
+        Args:
+            comprehensive: If True, test both modes even if current mode works.
+                          If False, only test current mode (faster, less wear).
+        """
+        # Only test if we have root privileges
+        if os.geteuid() != 0:
+            print("⚠️  Skipping PWM responsiveness test (requires root)")
+            return
+
+        mode_desc = "comprehensive mode" if comprehensive else "current mode only"
+        print(f"\n🔬 Testing PWM channel responsiveness ({mode_desc})...")
+        print("   This will temporarily adjust fan speeds to detect which channels are active.")
+        if comprehensive:
+            print("   Testing both PWM and DC modes for each channel.")
+        else:
+            print("   Testing current BIOS mode only (use --test-pwm-full for comprehensive test).")
+        print()
+        time.sleep(1)
+
+        for pwm_path, enable_path, mode_path, label in self.pwm_controls:
+            pwm_num = pwm_path.name.replace("pwm", "")
+
+            # Find corresponding fan sensor
+            fan_sensor = None
+            for fan_path, fan_label in self.fan_sensors:
+                if f"fan{pwm_num}" in str(fan_path):
+                    fan_sensor = (fan_path, fan_label)
+                    break
+
+            if not fan_sensor:
+                print(f"   {label}: No fan sensor found, skipping test")
+                continue
+
+            # Read current state
+            original_enable = self.read_file(enable_path)
+            original_pwm = self.read_file(pwm_path)
+            original_mode = self.read_file(mode_path)
+            initial_rpm_str = self.read_file(fan_sensor[0])
+
+            if not all([original_enable, original_pwm, original_mode, initial_rpm_str]):
+                print(f"   {label}: Cannot read current state, skipping test")
+                continue
+
+            try:
+                initial_rpm = int(initial_rpm_str)
+                original_pwm_val = int(original_pwm)
+
+                # Test modes - start with current mode
+                results = {}
+                original_mode_name = "PWM" if original_mode == "1" else "DC"
+
+                # Determine which modes to test
+                if comprehensive:
+                    modes_to_test = [("PWM", "1"), ("DC", "0")]
+                else:
+                    # Test current mode only
+                    modes_to_test = [(original_mode_name, original_mode)]
+
+                for mode_name, mode_value in modes_to_test:
+                    # Set to manual mode
+                    self.write_file(enable_path, "1")
+
+                    # Try to change mode (may not be supported by hardware)
+                    if mode_value != original_mode:
+                        mode_changed = self.write_file(mode_path, mode_value, silent=True)
+                        if not mode_changed:
+                            # Hardware doesn't support this mode
+                            results[mode_name] = None
+                            continue
+
+                        # Wait longer after mode change for fan to stabilize
+                        time.sleep(3)
+                    else:
+                        # Same mode, shorter wait
+                        time.sleep(1)
+
+                    # Set a medium baseline PWM to start from stable state
+                    baseline_pwm = 128
+                    self.write_file(pwm_path, str(baseline_pwm))
+                    time.sleep(3)  # Wait for fan to stabilize at baseline
+
+                    # Get baseline RPM in this mode
+                    baseline_rpm_str = self.read_file(fan_sensor[0])
+                    if not baseline_rpm_str:
+                        results[mode_name] = None
+                        continue
+
+                    baseline_rpm = int(baseline_rpm_str)
+
+                    # Set a test PWM value (significantly different for clear response)
+                    # Go high to see if fan speeds up
+                    test_pwm = 220
+                    self.write_file(pwm_path, str(test_pwm))
+
+                    # Wait longer for fan to respond and stabilize
+                    time.sleep(4)
+
+                    # Measure new RPM
+                    new_rpm_str = self.read_file(fan_sensor[0])
+                    if new_rpm_str:
+                        new_rpm = int(new_rpm_str)
+                        rpm_change = abs(new_rpm - baseline_rpm)
+                        rpm_change_pct = (rpm_change / max(baseline_rpm, 1)) * 100
+
+                        results[mode_name] = {
+                            'baseline': baseline_rpm,
+                            'new': new_rpm,
+                            'change': rpm_change,
+                            'change_pct': rpm_change_pct,
+                            'responsive': rpm_change > 50 or rpm_change_pct > 5
+                        }
+                    else:
+                        results[mode_name] = None
+
+                    # Restore PWM to original
+                    self.write_file(pwm_path, original_pwm)
+                    time.sleep(1)
+
+                # Analyze results
+                pwm_responsive = results.get("PWM") and results["PWM"]["responsive"]
+                dc_responsive = results.get("DC") and results["DC"]["responsive"]
+
+                # For non-comprehensive mode, simplify output
+                if not comprehensive:
+                    current_result = results.get(original_mode_name)
+                    if current_result and current_result["responsive"]:
+                        print(f"   {label}: ✓ Working correctly ({original_mode_name} mode) - RPM: {current_result['baseline']} → {current_result['new']} (Δ{current_result['change']:.0f})")
+                    elif current_result:
+                        print(f"   {label}: ⚠️  Not responding ({original_mode_name} mode) - RPM: {current_result['baseline']} → {current_result['new']} (Δ{current_result['change']:.0f})")
+                        print(f"                May be misconfigured or broken fan")
+                    else:
+                        print(f"   {label}: ✗ Cannot test")
+                    continue
+
+                # Comprehensive mode analysis
+                if pwm_responsive and dc_responsive:
+                    # Both modes work
+                    pwm_change = results["PWM"]["change"]
+                    dc_change = results["DC"]["change"]
+                    if pwm_change > dc_change * 1.2:
+                        print(f"   {label}: ✓ Works in both modes, PWM recommended (better response: {pwm_change:.0f} vs {dc_change:.0f} RPM)")
+                    elif dc_change > pwm_change * 1.2:
+                        print(f"   {label}: ✓ Works in both modes, DC recommended (better response: {dc_change:.0f} vs {pwm_change:.0f} RPM)")
+                    else:
+                        print(f"   {label}: ✓ Works equally in both modes (PWM: {pwm_change:.0f}, DC: {dc_change:.0f} RPM change)")
+
+                    if original_mode_name not in ["PWM", "DC"] or \
+                       (original_mode_name == "PWM" and dc_change > pwm_change * 1.2) or \
+                       (original_mode_name == "DC" and pwm_change > dc_change * 1.2):
+                        print(f"                ⚠️  Consider changing BIOS mode setting")
+
+                elif pwm_responsive and not dc_responsive:
+                    if results.get("DC") is None:
+                        print(f"   {label}: ✓ PWM mode only (hardware doesn't support DC) - RPM: {results['PWM']['baseline']} → {results['PWM']['new']}")
+                    else:
+                        print(f"   {label}: ✓ Works in PWM mode only (RPM: {results['PWM']['baseline']} → {results['PWM']['new']})")
+                        if original_mode != "1":
+                            print(f"                ⚠️  MISCONFIGURATION: BIOS set to DC but device needs PWM!")
+
+                elif dc_responsive and not pwm_responsive:
+                    print(f"   {label}: ✓ Works in DC mode only (RPM: {results['DC']['baseline']} → {results['DC']['new']})")
+                    if original_mode != "0":
+                        print(f"                ⚠️  MISCONFIGURATION: BIOS set to PWM but device needs DC!")
+
+                else:
+                    print(f"   {label}: ✗ Not responsive in either mode or no fan connected")
+
+            except (ValueError, TypeError) as e:
+                print(f"   {label}: Error during test: {e}")
+            finally:
+                # Restore original state
+                self.write_file(mode_path, original_mode)
+                self.write_file(pwm_path, original_pwm)
+                self.write_file(enable_path, original_enable)
+                time.sleep(0.5)
+
+        print("\n✓ PWM mode detection test completed\n")
 
     def get_temperatures(self) -> Dict[str, float]:
         """Get all available temperature sensors"""
@@ -316,10 +499,7 @@ class FanController:
         """Get current PWM values and modes (value, mode)"""
         pwm_info = {}
 
-        for pwm_path, enable_path, label in self.pwm_controls:
-            pwm_num = pwm_path.name.replace("pwm", "")
-            mode_path = pwm_path.parent / f"pwm{pwm_num}_mode"
-
+        for pwm_path, enable_path, mode_path, label in self.pwm_controls:
             value = self.read_file(pwm_path)
             mode = self.read_file(mode_path)
             enable = self.read_file(enable_path)
@@ -380,7 +560,7 @@ class FanController:
         success_count = 0
         failed_pwms = []
 
-        for pwm_path, enable_path, label in self.pwm_controls:
+        for pwm_path, enable_path, _, label in self.pwm_controls:
             if self.restore_bios_control(enable_path):
                 success_count += 1
                 print(f"  {label}: ✓ Restored to BIOS control (auto mode)")
@@ -633,7 +813,7 @@ class FanController:
 
         # Set all PWM channels to manual mode
         print("Setting PWM channels to manual mode...")
-        for pwm_path, enable_path, label in self.pwm_controls:
+        for pwm_path, enable_path, _, label in self.pwm_controls:
             if not self.set_pwm_manual_mode(pwm_path, enable_path):
                 print(f"Warning: Could not set {label} to manual mode")
 
@@ -678,7 +858,7 @@ class FanController:
                             pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
 
                             # Set all PWM channels
-                            for pwm_path, enable_path, label in self.pwm_controls:
+                            for pwm_path, enable_path, _, label in self.pwm_controls:
                                 self.set_pwm_value(pwm_path, pwm_value)
 
                             # Build control info
@@ -851,6 +1031,10 @@ def main():
                        help=f'Number of history samples to keep (config: {config["history_size"]})')
     parser.add_argument('-n', '--iterations', type=int, default=None,
                        help='Number of iterations before exiting (for testing)')
+    parser.add_argument('--test-pwm', action='store_true',
+                       help='Test PWM channel responsiveness in current mode (requires root)')
+    parser.add_argument('--test-pwm-full', action='store_true',
+                       help='Test PWM channel responsiveness in both PWM and DC modes (requires root, takes longer)')
 
     args = parser.parse_args()
 
@@ -882,6 +1066,11 @@ def main():
     controller.temp_max = temp_max
     controller.pwm_min = pwm_min
     controller.pwm_max = pwm_max
+
+    # Test PWM responsiveness if requested
+    if args.test_pwm or args.test_pwm_full:
+        controller.test_pwm_responsiveness(comprehensive=args.test_pwm_full)
+        return
 
     # Check if running as root
     is_root = os.geteuid() == 0
