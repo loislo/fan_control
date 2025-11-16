@@ -322,31 +322,66 @@ sensors
 ```
 Then use `--hwmon` option with the correct path.
 
-## Running at Startup
+## Installation
 
-To run automatic fan control at boot, you can create a systemd service. Create `/etc/systemd/system/fan-control.service`:
+### Manual Installation
 
-```ini
-[Unit]
-Description=Automatic Fan Control
-After=multi-user.target
+For system-wide installation:
 
-[Service]
-Type=simple
-ExecStart=/home/ilya/Projects/fan_control/fan_monitor.py --auto --temp-min 45 --temp-max 80
-Restart=on-failure
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable it:
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable fan-control.service
-sudo systemctl start fan-control.service
+# 1. Install the script to system location
+sudo cp fan_monitor.py /usr/local/bin/
+sudo chmod +x /usr/local/bin/fan_monitor.py
+
+# 2. Run once to create default config in ~/.config/fan_control/
+/usr/local/bin/fan_monitor.py --watch --iterations 1
+
+# 3. (Optional) Create system-wide config
+sudo mkdir -p /etc/fan_control
+sudo cp ~/.config/fan_control/fan_control.conf /etc/fan_control/
+
+# 4. Test the installation
+sudo /usr/local/bin/fan_monitor.py --test-pwm
 ```
+
+### Running at Startup (systemd service)
+
+To run automatic fan control at boot:
+
+```bash
+# 1. Copy the service file
+sudo cp fan-control.service /etc/systemd/system/
+
+# 2. Reload systemd
+sudo systemctl daemon-reload
+
+# 3. Enable the service to start at boot
+sudo systemctl enable fan-control.service
+
+# 4. Start the service now
+sudo systemctl start fan-control.service
+
+# 5. Check status
+sudo systemctl status fan-control.service
+```
+
+**Managing the service:**
+
+```bash
+# View logs
+sudo journalctl -u fan-control.service -f
+
+# Stop the service
+sudo systemctl stop fan-control.service
+
+# Restart the service
+sudo systemctl restart fan-control.service
+
+# Disable auto-start
+sudo systemctl disable fan-control.service
+```
+
+The service file is included in the repository and will run the script with default config settings. To customize, edit your config file at `~/.config/fan_control/fan_control.conf` or `/etc/fan_control/fan_control.conf`.
 
 ## License
 

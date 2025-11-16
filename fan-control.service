@@ -1,0 +1,20 @@
+[Unit]
+Description=Automatic Fan Control
+After=multi-user.target
+Documentation=https://github.com/loislo/fan_control
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fan_monitor.py --auto
+Restart=on-failure
+RestartSec=10s
+
+# Run as root (required for fan control)
+User=root
+
+# Output to systemd journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
