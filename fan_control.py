@@ -659,6 +659,10 @@ class FanController:
 
     def display_status(self, clear: bool = False, show_history: bool = False, control_info: str = ""):
         """Display current temperatures and fan speeds"""
+        # Skip display if running without a terminal (daemon mode)
+        if not sys.stdout.isatty():
+            return
+
         # Build entire output in memory first for instant redraw
         output = []
 
@@ -804,18 +808,22 @@ class FanController:
 
     def auto_control(self, interval: float = 2.0, max_iterations: int = None):
         """Automatically control fans based on temperature"""
-        print("\n🤖 AUTOMATIC FAN CONTROL ENABLED")
-        print(f"Temperature range: {self.temp_min}°C - {self.temp_max}°C")
-        print(f"PWM range: {self.pwm_min}/255 ({self.pwm_min/255*100:.1f}%) - {self.pwm_max}/255 ({self.pwm_max/255*100:.1f}%)")
-        if max_iterations:
-            print(f"Test mode: Running for {max_iterations} iterations")
-        print("\nControls: [Q]uit  [W]Increase  [S]Decrease fan speed\n")
+        # Only show interactive messages if we have a terminal
+        if sys.stdout.isatty():
+            print("\n🤖 AUTOMATIC FAN CONTROL ENABLED")
+            print(f"Temperature range: {self.temp_min}°C - {self.temp_max}°C")
+            print(f"PWM range: {self.pwm_min}/255 ({self.pwm_min/255*100:.1f}%) - {self.pwm_max}/255 ({self.pwm_max/255*100:.1f}%)")
+            if max_iterations:
+                print(f"Test mode: Running for {max_iterations} iterations")
+            print("\nControls: [Q]uit  [W]Increase  [S]Decrease fan speed\n")
 
         # Set all PWM channels to manual mode
-        print("Setting PWM channels to manual mode...")
+        if sys.stdout.isatty():
+            print("Setting PWM channels to manual mode...")
         for pwm_path, enable_path, _, label in self.pwm_controls:
             if not self.set_pwm_manual_mode(pwm_path, enable_path):
-                print(f"Warning: Could not set {label} to manual mode")
+                if sys.stdout.isatty():
+                    print(f"Warning: Could not set {label} to manual mode")
 
         time.sleep(1)
 
@@ -861,16 +869,19 @@ class FanController:
                             for pwm_path, enable_path, _, label in self.pwm_controls:
                                 self.set_pwm_value(pwm_path, pwm_value)
 
-                            # Build control info
-                            control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
-                            if self.manual_pwm_offset != 0:
-                                control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            # Display status or log to console
+                            if sys.stdout.isatty():
+                                # Interactive mode: fancy display
+                                control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
+                                if self.manual_pwm_offset != 0:
+                                    control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                                else:
+                                    control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                                control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
+                                self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
                             else:
-                                control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
-                            control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
-
-                            # Display status (clear screen after first iteration)
-                            self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
+                                # Daemon mode: simple status output
+                                print(f"Fan control active: Max temp {max_temp:.1f}°C → PWM {pwm_value}/255 ({pwm_value/255*100:.1f}%)", flush=True)
                             first_iteration = False
                             last_update = current_time
                             force_update = False
