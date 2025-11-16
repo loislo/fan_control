@@ -94,30 +94,42 @@ The `set` command saves the specified flags to the config file for future use.
 
 ## Usage
 
-### 1. View Current Status (Single Snapshot)
+The script automatically adapts its behavior based on user privileges:
+
+- **Non-root users**: Automatically runs in continuous monitoring mode (watch mode)
+- **Root users without flags**: Automatically runs fan control (auto mode)
+- **Root users with --watch**: Runs in monitoring-only mode
+
+### 1. Automatic Fan Control (Default for Root)
 
 ```bash
-./fan_monitor.py
+sudo ./fan_monitor.py
 ```
 
-Displays current temperatures, fan speeds, and PWM values once.
+When run as root without flags, automatically controls fans based on temperature.
+This is the recommended way to run the script for active cooling management.
 
-### 2. Continuous Monitoring
+### 2. Monitoring Mode Only (Watch)
 
 ```bash
 ./fan_monitor.py --watch
+# Or for root users who only want to monitor:
+sudo ./fan_monitor.py --watch
 ```
 
 Updates the display every 2 seconds. Press **Q** to quit.
 
-### 3. Automatic Fan Control
+**Notes**:
+- Non-root users automatically run in watch mode
+- Root users need the `--watch` flag to monitor without controlling fans
 
-**⚠️ IMPORTANT**: This requires root/sudo privileges to write to sysfs!
+### 3. Explicit Auto Control Mode
 
 ```bash
 sudo ./fan_monitor.py --auto
 ```
 
+Explicitly enable automatic fan control (same as running without flags as root).
 Automatically adjusts fan speeds based on temperature:
 - **45°C**: Minimum fan speed (~4%)
 - **80°C**: Maximum fan speed (100%)
@@ -192,6 +204,8 @@ The script monitors:
 ## Safety Notes
 
 1. **Root Privileges**: Automatic control requires `sudo` to write to `/sys/class/hwmon/`
+   - Non-root users automatically run in safe monitoring mode only
+   - Attempting `--auto` without root privileges will fall back to watch mode with a warning
 2. **Fan Stall Prevention**: The default minimum is 10/255 (~4%). Adjust if your fans stall at low speeds
 3. **Exit Behavior**: When you stop the script (Ctrl+C or Q), BIOS control is automatically restored
 4. **Crash Protection**: The script uses a try/finally block to restore BIOS control even if it crashes

@@ -12,6 +12,7 @@ import select
 import termios
 import tty
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import deque
@@ -76,8 +77,6 @@ class FanController:
 
     def __init__(self, hwmon_path: str = "/sys/class/hwmon/hwmon3", history_size: int = 60):
         self.hwmon_path = Path(hwmon_path)
-        self.num_fans = 7
-        self.num_pwms = 7
 
         # Temperature control curve parameters
         self.temp_min = 45.0  # Minimum speed temperature (°C)
@@ -107,6 +106,12 @@ class FanController:
         self.COLOR_CYAN = '\033[96m'
         self.COLOR_RESET = '\033[0m'
 
+        # Auto-detect sensors, fans, and PWM controls
+        self.temp_sensors = []  # List of (path, label) tuples
+        self.fan_sensors = []   # List of (path, label) tuples
+        self.pwm_controls = []  # List of (path, enable_path, label) tuples
+        self._detect_hardware()
+
     def read_file(self, path: Path) -> str:
         """Read a sysfs file and return its contents"""
         try:
@@ -119,49 +124,118 @@ class FanController:
         try:
             path.write_text(value)
             return True
-        except (FileNotFoundError, PermissionError) as e:
+        except (FileNotFoundError, PermissionError, OSError) as e:
             print(f"Error writing to {path}: {e}")
             return False
+
+    def _detect_hardware(self):
+        """Auto-detect available temperature sensors, fans, and PWM controls"""
+        hwmon_base = Path("/sys/class/hwmon")
+
+        if not hwmon_base.exists():
+            print("Warning: /sys/class/hwmon not found")
+            return
+
+        # Scan all hwmon devices
+        for hwmon_dir in sorted(hwmon_base.iterdir()):
+            if not hwmon_dir.is_symlink() and not hwmon_dir.is_dir():
+                continue
+
+            # Get device name
+            name_file = hwmon_dir / "name"
+            device_name = self.read_file(name_file) if name_file.exists() else hwmon_dir.name
+
+            # Detect temperature sensors
+            for temp_file in sorted(hwmon_dir.glob("temp*_input")):
+                # Get label if available
+                label_file = temp_file.parent / temp_file.name.replace("_input", "_label")
+                if label_file.exists():
+                    label = self.read_file(label_file)
+                else:
+                    # Generate label from device name and temp number
+                    temp_num = temp_file.name.replace("temp", "").replace("_input", "")
+                    label = f"{device_name}_temp{temp_num}"
+
+                self.temp_sensors.append((temp_file, label))
+
+            # Detect fan sensors
+            for fan_file in sorted(hwmon_dir.glob("fan*_input")):
+                # Get label if available
+                label_file = fan_file.parent / fan_file.name.replace("_input", "_label")
+                if label_file.exists():
+                    label = self.read_file(label_file)
+                else:
+                    # Generate label from device name and fan number
+                    fan_num = fan_file.name.replace("fan", "").replace("_input", "")
+                    label = f"{device_name}_fan{fan_num}"
+
+                self.fan_sensors.append((fan_file, label))
+
+            # Detect PWM controls (only from the configured hwmon device for safety)
+            if hwmon_dir.resolve() == self.hwmon_path.resolve():
+                for pwm_file in sorted(hwmon_dir.glob("pwm[0-9]*")):
+                    # Skip files like pwm1_enable, pwm1_mode, etc.
+                    if '_' in pwm_file.name:
+                        continue
+
+                    pwm_num = pwm_file.name.replace("pwm", "")
+                    enable_file = pwm_file.parent / f"pwm{pwm_num}_enable"
+
+                    # Only add if enable file exists (means it's controllable)
+                    if enable_file.exists():
+                        label = f"PWM{pwm_num}"
+                        self.pwm_controls.append((pwm_file, enable_file, label))
+
+        # Check for NVIDIA GPU
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,temperature.gpu", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # Add GPU as a virtual temperature sensor
+                gpu_name = result.stdout.strip().split(',')[0].strip()
+                self.temp_sensors.append(("nvidia-smi", gpu_name))
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass  # NVIDIA tools not available or GPU not present
+
+        # Print detection summary
+        print(f"🔍 Detected {len(self.temp_sensors)} temperature sensor(s)")
+        print(f"🔍 Detected {len(self.fan_sensors)} fan sensor(s)")
+        print(f"🔍 Detected {len(self.pwm_controls)} PWM control(s)")
 
     def get_temperatures(self) -> Dict[str, float]:
         """Get all available temperature sensors"""
         temps = {}
 
-        # Get CPU package temperature
-        coretemp_path = Path("/sys/class/hwmon/hwmon2")
-        if coretemp_path.exists():
-            temp_input = coretemp_path / "temp1_input"
-            if temp_input.exists():
-                value = self.read_file(temp_input)
+        for sensor_path, label in self.temp_sensors:
+            # Handle NVIDIA GPU specially
+            if sensor_path == "nvidia-smi":
+                try:
+                    result = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader"],
+                        capture_output=True,
+                        text=True,
+                        timeout=2
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        temp = float(result.stdout.strip())
+                        temps[label] = temp
+                except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, Exception):
+                    pass  # GPU temp unavailable
+            else:
+                # Regular sysfs sensor
+                value = self.read_file(sensor_path)
                 if value:
-                    temps['CPU Package'] = int(value) / 1000.0
-
-        # Get NCT6797 temperatures
-        nct_temp_map = {
-            'temp1_input': 'SYSTIN',
-            'temp2_input': 'CPUTIN',
-            'temp3_input': 'AUXTIN0',
-            'temp4_input': 'AUXTIN1',
-            'temp7_input': 'AUXTIN2',
-            'temp8_input': 'AUXTIN3',
-        }
-
-        for temp_file, name in nct_temp_map.items():
-            temp_path = self.hwmon_path / temp_file
-            if temp_path.exists():
-                value = self.read_file(temp_path)
-                if value:
-                    temp_c = int(value) / 1000.0
-                    # Skip invalid readings
-                    if temp_c > 0 and temp_c < 120:
-                        temps[name] = temp_c
-
-        # Get NVMe temperature
-        nvme_path = Path("/sys/class/hwmon/hwmon1/temp1_input")
-        if nvme_path.exists():
-            value = self.read_file(nvme_path)
-            if value:
-                temps['NVMe'] = int(value) / 1000.0
+                    try:
+                        temp_c = int(value) / 1000.0
+                        # Skip invalid readings
+                        if 0 < temp_c < 120:
+                            temps[label] = temp_c
+                    except (ValueError, TypeError):
+                        pass  # Skip invalid values
 
         return temps
 
@@ -169,11 +243,16 @@ class FanController:
         """Get current fan speeds in RPM"""
         speeds = {}
 
-        for i in range(1, self.num_fans + 1):
-            fan_path = self.hwmon_path / f"fan{i}_input"
+        for fan_path, label in self.fan_sensors:
             value = self.read_file(fan_path)
             if value:
-                speeds[f'Fan {i}'] = int(value)
+                try:
+                    rpm = int(value)
+                    # Skip invalid readings (0 RPM often means disconnected fan)
+                    if rpm > 0:
+                        speeds[label] = rpm
+                except (ValueError, TypeError):
+                    pass  # Skip invalid values
 
         return speeds
 
@@ -181,28 +260,32 @@ class FanController:
         """Get current PWM values and modes (value, mode)"""
         pwm_info = {}
 
-        for i in range(1, self.num_pwms + 1):
-            pwm_path = self.hwmon_path / f"pwm{i}"
-            mode_path = self.hwmon_path / f"pwm{i}_mode"
-            enable_path = self.hwmon_path / f"pwm{i}_enable"
+        for pwm_path, enable_path, label in self.pwm_controls:
+            pwm_num = pwm_path.name.replace("pwm", "")
+            mode_path = pwm_path.parent / f"pwm{pwm_num}_mode"
 
             value = self.read_file(pwm_path)
             mode = self.read_file(mode_path)
             enable = self.read_file(enable_path)
 
-            if value and mode:
-                mode_str = "PWM" if mode == "1" else "DC"
-                enable_str = {
-                    "0": "off/full",
-                    "1": "manual",
-                    "2": "auto",
-                    "3": "auto",
-                    "4": "auto",
-                    "5": "auto"
-                }.get(enable, "unknown")
+            if value:
+                try:
+                    pwm_value = int(value)
+                    pwm_percent = pwm_value / 255.0 * 100
 
-                pwm_percent = int(value) / 255.0 * 100
-                pwm_info[f'PWM {i}'] = (int(value), pwm_percent, mode_str, enable_str)
+                    mode_str = "PWM" if mode == "1" else "DC" if mode else "unknown"
+                    enable_str = {
+                        "0": "off/full",
+                        "1": "manual",
+                        "2": "auto",
+                        "3": "auto",
+                        "4": "auto",
+                        "5": "auto"
+                    }.get(enable, "unknown")
+
+                    pwm_info[label] = (pwm_value, pwm_percent, mode_str, enable_str)
+                except (ValueError, TypeError):
+                    pass  # Skip invalid values
 
         return pwm_info
 
@@ -218,38 +301,54 @@ class FanController:
             pwm = self.pwm_min + ratio * (self.pwm_max - self.pwm_min)
             return int(pwm)
 
-    def set_pwm_manual_mode(self, pwm_num: int) -> bool:
+    def set_pwm_manual_mode(self, pwm_path: Path, enable_path: Path) -> bool:
         """Set a PWM channel to manual mode"""
-        enable_path = self.hwmon_path / f"pwm{pwm_num}_enable"
         return self.write_file(enable_path, "1")
 
-    def restore_bios_control(self, pwm_num: int) -> bool:
+    def restore_bios_control(self, enable_path: Path) -> bool:
         """Restore BIOS/automatic control for a PWM channel"""
-        enable_path = self.hwmon_path / f"pwm{pwm_num}_enable"
-        return self.write_file(enable_path, "2")
+        # Try to write "2" for auto mode
+        write_result = self.write_file(enable_path, "2")
+
+        # Verify the write was successful by reading back
+        if write_result:
+            actual_value = self.read_file(enable_path)
+            if actual_value != "2":
+                return False
+
+        return write_result
 
     def restore_all_bios_control(self):
         """Restore BIOS/automatic control for all PWM channels"""
         print("\n🔄 Restoring BIOS control for all fans...")
         success_count = 0
-        for i in range(1, self.num_pwms + 1):
-            if self.restore_bios_control(i):
+        failed_pwms = []
+
+        for pwm_path, enable_path, label in self.pwm_controls:
+            if self.restore_bios_control(enable_path):
                 success_count += 1
+                print(f"  {label}: ✓ Restored to BIOS control (auto mode)")
             else:
-                print(f"Warning: Could not restore BIOS control for PWM{i}")
+                failed_pwms.append(label)
+                print(f"  {label}: ✗ Failed to restore BIOS control")
+                # For channels that don't support auto mode, keep them in manual
+                # but set a safe PWM value (medium speed)
+                print(f"  {label}: Setting to safe speed (50%) in manual mode")
+                self.write_file(pwm_path, "128")  # 50% speed
 
-        if success_count == self.num_pwms:
-            print(f"✓ Successfully restored BIOS control for all {self.num_pwms} PWM channels")
+        total_pwms = len(self.pwm_controls)
+        if success_count == total_pwms:
+            print(f"✓ Successfully restored BIOS control for all {total_pwms} PWM channels")
         else:
-            print(f"⚠ Restored BIOS control for {success_count}/{self.num_pwms} PWM channels")
+            print(f"⚠ Restored BIOS control for {success_count}/{total_pwms} PWM channels")
+            print(f"  Failed PWMs set to 50% manual speed: {', '.join(failed_pwms)}")
 
-    def set_pwm_value(self, pwm_num: int, value: int) -> bool:
+    def set_pwm_value(self, pwm_path: Path, value: int) -> bool:
         """Set PWM value (0-255)"""
         if not 0 <= value <= 255:
             print(f"Invalid PWM value: {value} (must be 0-255)")
             return False
 
-        pwm_path = self.hwmon_path / f"pwm{pwm_num}"
         return self.write_file(pwm_path, str(value))
 
     def get_temp_color(self, temp: float) -> str:
@@ -349,18 +448,23 @@ class FanController:
         # Calculate display widths based on terminal size
         sep_width = min(self.term_width, 140)
 
+        # Find maximum label lengths for each section
+        max_temp_label = max(len(name) for name in temps.keys()) if temps else 12
+        max_fan_label = max(len(name) for name in speeds.keys()) if speeds else 12
+        max_pwm_label = max(len(name) for name in pwm_info.keys()) if pwm_info else 12
+
         # Calculate bar widths dynamically to fill the terminal width
-        # Temperature format: "  {name:12s}: {temp:5.1f}°C  [{bar}]"
-        # Fixed parts: 2 + 12 + 2 + 5 + 2 + 2 + 1 + 1 = 27 chars
-        temp_bar_width = max(20, sep_width - 27)
+        # Temperature format: "  {name:Ns}: {temp:5.1f}°C  [{bar}]"
+        # Fixed parts: 2 (indent) + N (label) + 2 (": ") + 5 (temp) + 2 ("°C") + 2 ("  ") + 1 ("[") + 1 ("]") = 15 + N
+        temp_bar_width = max(20, sep_width - (15 + max_temp_label))
 
-        # Fan speed format: "  {name:12s}: {rpm:4d} RPM  [{bar}]"
-        # Fixed parts: 2 + 12 + 2 + 4 + 4 + 2 + 1 + 1 = 28 chars
-        fan_bar_width = max(20, sep_width - 28)
+        # Fan speed format: "  {name:Ns}: {rpm:4d} RPM  [{bar}]"
+        # Fixed parts: 2 + N + 2 + 4 + 4 + 2 + 1 + 1 = 16 + N
+        fan_bar_width = max(20, sep_width - (16 + max_fan_label))
 
-        # PWM format: "  {name:12s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]"
-        # Fixed parts: 2 + 12 + 2 + 3 + 4 + 2 + 5 + 3 + 2 + 1 + 1 = 37 chars
-        pwm_bar_width = max(20, sep_width - 37)
+        # PWM format: "  {name:Ns}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]"
+        # Fixed parts: 2 + N + 2 + 3 + 4 + 2 + 5 + 3 + 2 + 1 + 1 = 25 + N
+        pwm_bar_width = max(20, sep_width - (25 + max_pwm_label))
 
         # Build output
         output.append("\n" + "=" * sep_width)
@@ -375,10 +479,10 @@ class FanController:
             bar_length = int(temp / 100 * temp_bar_width)
             color = self.get_temp_color(temp)
             bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (temp_bar_width - bar_length)
-            output.append(f"  {name:12s}: {temp:5.1f}°C  [{bar}]")
+            output.append(f"  {name:{max_temp_label}s}: {temp:5.1f}°C  [{bar}]")
 
         max_temp_color = self.get_temp_color(max_temp)
-        output.append(f"\n  {'Max Temp':12s}: {max_temp_color}{max_temp:5.1f}°C{self.COLOR_RESET}")
+        output.append(f"\n  {'Max Temp':{max_temp_label}s}: {max_temp_color}{max_temp:5.1f}°C{self.COLOR_RESET}")
 
         # Display fan speeds
         output.append("\n🌀 FAN SPEEDS:")
@@ -388,10 +492,10 @@ class FanController:
             bar_length = int(min(rpm / 3000 * fan_bar_width, fan_bar_width))
             color = self.get_fan_color(rpm, 3000)
             bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (fan_bar_width - bar_length)
-            output.append(f"  {name:12s}: {rpm:4d} RPM  [{bar}]")
+            output.append(f"  {name:{max_fan_label}s}: {rpm:4d} RPM  [{bar}]")
 
         avg_color = self.get_fan_color(avg_fan_speed, 3000)
-        output.append(f"\n  {'Avg Speed':12s}: {avg_color}{avg_fan_speed:4.0f} RPM{self.COLOR_RESET}")
+        output.append(f"\n  {'Avg Speed':{max_fan_label}s}: {avg_color}{avg_fan_speed:4.0f} RPM{self.COLOR_RESET}")
 
         # Display PWM values
         output.append("\n⚙️  PWM CONTROLS:")
@@ -407,7 +511,7 @@ class FanController:
             else:
                 color = self.COLOR_RED
             bar = color + "█" * bar_length + self.COLOR_RESET + "░" * (pwm_bar_width - bar_length)
-            output.append(f"  {name:12s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]")
+            output.append(f"  {name:{max_pwm_label}s}: {value:3d}/255 ({percent:5.1f}%)  [{bar}]")
 
         # Display history graphs
         if show_history and len(self.temp_history) > 1:
@@ -422,6 +526,7 @@ class FanController:
             # Temperature history
             temp_min = min(self.temp_history)
             temp_max_val = max(self.temp_history)
+            # self.temp_history.maxlen = graph_width
             temp_bars = self.create_vertical_bars(self.temp_history, 100.0, width=graph_width, height=8, is_temp=True)
             temp_color = self.get_temp_color(max_temp)
             output.append(f"  Temperature (°C)  Max: {temp_max_val:.1f}  Min: {temp_min:.1f}  Current: {temp_color}{max_temp:.1f}{self.COLOR_RESET}")
@@ -435,6 +540,7 @@ class FanController:
             # Fan speed history
             fan_min = min(self.fan_history)
             fan_max_val = max(self.fan_history)
+            # self.fan_history.maxlen = graph_width;
             fan_bars = self.create_vertical_bars(self.fan_history, 3000.0, width=graph_width, height=8, is_temp=False)
             fan_color = self.get_fan_color(avg_fan_speed, 3000)
             output.append(f"  Fan Speed (RPM)   Max: {fan_max_val:.0f}  Min: {fan_min:.0f}  Current: {fan_color}{avg_fan_speed:.0f}{self.COLOR_RESET}")
@@ -469,9 +575,9 @@ class FanController:
 
         # Set all PWM channels to manual mode
         print("Setting PWM channels to manual mode...")
-        for i in range(1, self.num_pwms + 1):
-            if not self.set_pwm_manual_mode(i):
-                print(f"Warning: Could not set PWM{i} to manual mode")
+        for pwm_path, enable_path, label in self.pwm_controls:
+            if not self.set_pwm_manual_mode(pwm_path, enable_path):
+                print(f"Warning: Could not set {label} to manual mode")
 
         time.sleep(1)
 
@@ -514,8 +620,8 @@ class FanController:
                             pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
 
                             # Set all PWM channels
-                            for i in range(1, self.num_pwms + 1):
-                                self.set_pwm_value(i, pwm_value)
+                            for pwm_path, enable_path, label in self.pwm_controls:
+                                self.set_pwm_value(pwm_path, pwm_value)
 
                             # Build control info
                             control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
@@ -717,7 +823,25 @@ def main():
     controller.pwm_min = pwm_min
     controller.pwm_max = pwm_max
 
+    # Check if running as root
+    is_root = os.geteuid() == 0
+
+    # Determine behavior based on user privileges and flags
+    if not is_root:
+        # Non-root users can only watch (no fan control)
+        if args.auto:
+            print("⚠️  Warning: Automatic fan control requires root privileges.")
+            print("Running in watch mode instead.\n")
+        # Force watch mode for non-root users
+        args.watch = True
+        args.auto = False
+    else:
+        # Root user without any flags: default to auto mode
+        if not args.auto and not args.watch:
+            args.auto = True
+
     if args.auto:
+        # Root user with --auto flag: control fans
         controller.auto_control(interval=interval, max_iterations=args.iterations)
     elif args.watch:
         if args.iterations:
