@@ -2,6 +2,30 @@
 
 A Python script for monitoring and automatically controlling system fans on Linux using the hwmon interface.
 
+## ⚠️ DISCLAIMER
+
+**USE AT YOUR OWN RISK!**
+
+This software directly controls your computer's cooling system. Improper use may result in:
+- Hardware overheating and potential damage
+- System instability or crashes
+- Voided warranties
+- Data loss
+
+**By using this software, you acknowledge that:**
+- You understand the risks involved in manual fan control
+- You are responsible for monitoring your system temperatures
+- The authors are NOT liable for any damage to your hardware, data loss, or any other consequences
+- This software is provided "AS IS" without warranty of any kind, express or implied
+- You should test carefully and monitor temperatures when first using this script
+
+**Recommendations:**
+- Start with conservative settings (higher minimum fan speeds)
+- Monitor your system temperatures closely when first using the script
+- Have temperature monitoring tools ready (e.g., `sensors`, `htop`)
+- Test the `--test-pwm` feature to verify your fans respond correctly
+- Keep BIOS fan control as a fallback option
+
 ## System Information
 
 - **Hardware**: NCT6797 fan controller
@@ -12,6 +36,9 @@ A Python script for monitoring and automatically controlling system fans on Linu
 ## Features
 
 - 📊 Real-time temperature monitoring from multiple sensors
+  - Auto-detects all available sensors (CPU, GPU, motherboard, NVMe)
+  - Highlights sensors used for fan control (cyan color)
+  - Smart filtering: displays all temps, but only uses CPU cores + GPU for control
 - 🌀 Fan speed monitoring (RPM)
 - ⚙️ PWM control status display
 - 🤖 Automatic fan control based on temperature curves
@@ -19,6 +46,9 @@ A Python script for monitoring and automatically controlling system fans on Linu
 - 🎨 Color-coded bars (green=low, yellow=medium, red=high)
 - ⌨️ Interactive keyboard controls (W/S to adjust fan speed, Q to quit)
 - 📝 Plain text configuration file with easy editing
+- 🔬 PWM channel testing to verify fans respond correctly
+  - Quick test: validates current BIOS configuration
+  - Comprehensive test: detects optimal PWM/DC mode
 
 ## Configuration
 
@@ -157,6 +187,36 @@ This example:
 
 Updates every 5 seconds instead of the default 2 seconds.
 
+### 6. PWM Channel Testing
+
+**Quick Test (Current Mode Only)**
+```bash
+sudo ./fan_monitor.py --test-pwm
+```
+
+Tests each PWM channel in its current BIOS-configured mode (PWM or DC). Takes ~8 seconds per channel.
+
+**Output:**
+- ✓ "Working correctly" - Fan responds to PWM changes as expected
+- ⚠️ "Not responding" - Fan doesn't respond (misconfiguration or broken/disconnected fan)
+
+**Comprehensive Test (Both Modes)**
+```bash
+sudo ./fan_monitor.py --test-pwm-full
+```
+
+Tests each channel in both PWM and DC modes to detect optimal configuration. Takes ~16 seconds per channel.
+
+**Output:**
+- Identifies which mode works better (if both work)
+- Detects misconfigurations (e.g., BIOS set to PWM but hardware needs DC)
+- Recommends mode changes for better performance
+
+**When to use:**
+- Run quick test (`--test-pwm`) after initial setup to verify all fans are working
+- Run comprehensive test (`--test-pwm-full`) if you suspect BIOS mode misconfiguration
+- Run before enabling automatic control to ensure fans respond correctly
+
 ## Command Line Options
 
 | Option | Description | Default |
@@ -164,12 +224,15 @@ Updates every 5 seconds instead of the default 2 seconds.
 | `-w, --watch` | Continuously monitor and update display | Off |
 | `-a, --auto` | Enable automatic fan control | Off |
 | `-i, --interval` | Update interval in seconds | 2.0 |
+| `-n, --iterations` | Number of iterations before exiting (for testing) | None |
 | `--temp-min` | Minimum temperature for fan curve (°C) | 45 |
 | `--temp-max` | Maximum temperature for fan curve (°C) | 80 |
 | `--pwm-min` | Minimum PWM value (0-255) | 10 |
 | `--pwm-max` | Maximum PWM value (0-255) | 255 |
-| `--history-size` | Number of history samples | 60 |
+| `--history-size` | Number of history samples | 300 |
 | `--hwmon` | Path to hwmon device | /sys/class/hwmon/hwmon3 |
+| `--test-pwm` | Test PWM channels in current mode (requires root) | Off |
+| `--test-pwm-full` | Test PWM channels in both PWM and DC modes (requires root) | Off |
 
 ## Keyboard Controls
 
@@ -185,12 +248,20 @@ The offset is applied to the automatic temperature-based PWM calculation, allowi
 
 ## Temperature Sensors
 
-The script monitors:
-- **CPU Package**: Main CPU temperature
-- **CPUTIN**: CPU temperature (from motherboard)
-- **SYSTIN**: System temperature
-- **AUXTIN0-2**: Auxiliary temperature sensors
-- **NVMe**: NVMe SSD temperature
+The script **displays** all available temperature sensors including:
+- **CPU Cores**: Individual CPU core temperatures (highlighted in cyan)
+- **CPU Package**: Overall CPU temperature (highlighted in cyan)
+- **NVIDIA GPU**: Graphics card temperature (highlighted in cyan)
+- **Motherboard sensors**: CPUTIN, SYSTIN, AUXTIN0-2, PECI Agent
+- **Storage**: NVMe SSD temperature (Composite, Sensor 2)
+- **System**: WiFi card, PCH, ACPI sensors
+
+**For fan control calculations**, the script uses **only**:
+- CPU core temperatures (Core 0-7)
+- CPU package temperature
+- NVIDIA GPU temperature
+
+Sensors highlighted in **cyan** are used for PWM control. All other sensors are displayed for informational purposes only. This filtering ensures fan speeds respond to the most critical components while avoiding unreliable or irrelevant sensors.
 
 ## PWM Control Details
 
@@ -279,4 +350,24 @@ sudo systemctl start fan-control.service
 
 ## License
 
-Free to use and modify as needed.
+MIT License
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
