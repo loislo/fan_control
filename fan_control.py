@@ -184,21 +184,26 @@ class FanController:
 
                 self.fan_sensors.append((fan_file, label))
 
-            # Detect PWM controls (only from the configured hwmon device for safety)
-            if hwmon_dir.resolve() == self.hwmon_path.resolve():
-                for pwm_file in sorted(hwmon_dir.glob("pwm[0-9]*")):
-                    # Skip files like pwm1_enable, pwm1_mode, etc.
-                    if '_' in pwm_file.name:
-                        continue
+            # Detect PWM controls from any hwmon device
+            # Scan all devices to find PWM controls (auto-detect)
+            for pwm_file in sorted(hwmon_dir.glob("pwm[0-9]*")):
+                # Skip files like pwm1_enable, pwm1_mode, etc.
+                if '_' in pwm_file.name:
+                    continue
 
-                    pwm_num = pwm_file.name.replace("pwm", "")
-                    enable_file = pwm_file.parent / f"pwm{pwm_num}_enable"
-                    mode_file = pwm_file.parent / f"pwm{pwm_num}_mode"
+                pwm_num = pwm_file.name.replace("pwm", "")
+                enable_file = pwm_file.parent / f"pwm{pwm_num}_enable"
+                mode_file = pwm_file.parent / f"pwm{pwm_num}_mode"
 
-                    # Only add if enable file exists (means it's controllable)
-                    if enable_file.exists():
-                        label = f"PWM{pwm_num}"
-                        self.pwm_controls.append((pwm_file, enable_file, mode_file, label))
+                # Only add if enable file exists (means it's controllable)
+                if enable_file.exists():
+                    label = f"PWM{pwm_num}"
+                    # Update hwmon_path to point to the device with PWM controls
+                    # (on first PWM control found)
+                    if not self.pwm_controls:
+                        self.hwmon_path = hwmon_dir
+                        print(f"🔍 Auto-detected PWM control device: {device_name} ({hwmon_dir})")
+                    self.pwm_controls.append((pwm_file, enable_file, mode_file, label))
 
         # Check for NVIDIA GPU
         try:
