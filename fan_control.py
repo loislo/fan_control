@@ -121,7 +121,8 @@ class FanController:
         """Read a sysfs file and return its contents"""
         try:
             return path.read_text().strip()
-        except (FileNotFoundError, PermissionError) as e:
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            # OSError can occur when sensor exists but has no data available
             return None
 
     def write_file(self, path: Path, value: str, silent: bool = False) -> bool:
