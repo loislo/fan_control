@@ -93,6 +93,10 @@ class FanController:
         # Manual control
         self.manual_pwm_offset = 0  # Offset from auto value for manual adjustment
 
+        # PWM smoothing for asymmetric response
+        self.current_pwm = None  # Track current PWM value for smooth transitions
+        self.pwm_decrease_step = 5  # Maximum PWM decrease per iteration (slow ramp-down)
+
         # Terminal size detection
         try:
             terminal_size = shutil.get_terminal_size(fallback=(140, 40))
@@ -851,9 +855,24 @@ class FanController:
 
                         max_temp = max(control_temps.values())
 
-                        # Calculate PWM value with manual offset
+                        # Calculate target PWM value with manual offset
                         base_pwm = self.calculate_pwm_from_temp(max_temp)
-                        pwm_value = max(0, min(255, base_pwm + self.manual_pwm_offset))
+                        target_pwm = max(0, min(255, base_pwm + self.manual_pwm_offset))
+
+                        # Implement asymmetric response (fast ramp-up, slow ramp-down)
+                        if self.current_pwm is None:
+                            # First iteration: set to target immediately
+                            pwm_value = target_pwm
+                        elif target_pwm > self.current_pwm:
+                            # Temperature rising: respond quickly (fast ramp-up)
+                            pwm_value = target_pwm
+                        else:
+                            # Temperature falling: respond slowly (slow ramp-down)
+                            pwm_decrease = min(self.current_pwm - target_pwm, self.pwm_decrease_step)
+                            pwm_value = self.current_pwm - pwm_decrease
+
+                        # Update current PWM tracker
+                        self.current_pwm = pwm_value
 
                         # Set all PWM channels
                         for pwm_path, enable_path, _, label in self.pwm_controls:
@@ -862,11 +881,13 @@ class FanController:
                         # Display status or log to console
                         if is_interactive:
                             # Interactive mode: fancy display
-                            control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Base PWM = {base_pwm}/255"
-                            if self.manual_pwm_offset != 0:
-                                control_info += f"  Offset: {self.manual_pwm_offset:+d} → Final PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            control_info = f"🎯 Control: Max temp = {max_temp:.1f}°C → Target PWM = {target_pwm}/255"
+                            if pwm_value != target_pwm:
+                                control_info += f" → Actual PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%) [ramping down]"
                             else:
                                 control_info += f" → PWM = {pwm_value}/255 ({pwm_value/255*100:.1f}%)"
+                            if self.manual_pwm_offset != 0:
+                                control_info += f"  (Offset: {self.manual_pwm_offset:+d})"
                             control_info += f"\n⌨️  Controls: [Q]uit  [W]Increase  [S]Decrease  |  Offset: {self.manual_pwm_offset:+d}"
                             self.display_status(clear=not first_iteration, show_history=True, control_info=control_info)
                         else:
@@ -929,6 +950,11 @@ temp_max = 80.0
 pwm_min = 10
 pwm_max = 255
 
+# PWM decrease step (0-255, lower = slower ramp-down)
+# Controls how fast fans slow down when temperature drops
+# Default: 5 (gradual decrease), set higher for faster response
+pwm_decrease_step = 5
+
 # Update interval in seconds
 interval = 2.0
 
@@ -947,6 +973,7 @@ def load_config():
         'temp_max': 80.0,
         'pwm_min': 10,
         'pwm_max': 255,
+        'pwm_decrease_step': 5,
         'history_size': 300,
         'hwmon_path': '/sys/class/hwmon/hwmon3'
     }
@@ -979,7 +1006,7 @@ def load_config():
                     # Convert to appropriate type
                     if key in ['temp_min', 'temp_max', 'interval']:
                         default_config[key] = float(value)
-                    elif key in ['pwm_min', 'pwm_max', 'history_size']:
+                    elif key in ['pwm_min', 'pwm_max', 'pwm_decrease_step', 'history_size']:
                         default_config[key] = int(value)
                     elif key == 'hwmon_path':
                         default_config[key] = value
@@ -1006,6 +1033,11 @@ temp_max = {config.get('temp_max', 80.0)}
 # PWM range (0-255)
 pwm_min = {config.get('pwm_min', 10)}
 pwm_max = {config.get('pwm_max', 255)}
+
+# PWM decrease step (0-255, lower = slower ramp-down)
+# Controls how fast fans slow down when temperature drops
+# Default: 5 (gradual decrease), set higher for faster response
+pwm_decrease_step = {config.get('pwm_decrease_step', 5)}
 
 # Update interval in seconds
 interval = {config.get('interval', 2.0)}
@@ -1046,6 +1078,8 @@ def main():
                        help=f'Minimum PWM value 0-255 (config: {config["pwm_min"]})')
     parser.add_argument('--pwm-max', type=int, default=None,
                        help=f'Maximum PWM value 0-255 (config: {config["pwm_max"]})')
+    parser.add_argument('--pwm-decrease-step', type=int, default=None,
+                       help=f'PWM decrease step for ramp-down (config: {config["pwm_decrease_step"]})')
     parser.add_argument('--history-size', type=int, default=None,
                        help=f'Number of history samples to keep (config: {config["history_size"]})')
     parser.add_argument('-n', '--iterations', type=int, default=None,
@@ -1066,6 +1100,7 @@ def main():
     temp_max = args.temp_max if args.temp_max is not None else config['temp_max']
     pwm_min = args.pwm_min if args.pwm_min is not None else config['pwm_min']
     pwm_max = args.pwm_max if args.pwm_max is not None else config['pwm_max']
+    pwm_decrease_step = args.pwm_decrease_step if args.pwm_decrease_step is not None else config['pwm_decrease_step']
     history_size = args.history_size if args.history_size is not None else config['history_size']
 
     # If "set" command is used, save config and exit
@@ -1077,6 +1112,7 @@ def main():
             'temp_max': temp_max,
             'pwm_min': pwm_min,
             'pwm_max': pwm_max,
+            'pwm_decrease_step': pwm_decrease_step,
             'history_size': history_size
         }
         save_config(new_config)
@@ -1087,6 +1123,7 @@ def main():
     controller.temp_max = temp_max
     controller.pwm_min = pwm_min
     controller.pwm_max = pwm_max
+    controller.pwm_decrease_step = pwm_decrease_step
 
     # Test PWM responsiveness if requested
     if args.test_pwm or args.test_pwm_full:
