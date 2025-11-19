@@ -928,10 +928,14 @@ class FanController:
 
 
 def get_config_path():
-    """Get the path to the config file"""
-    config_dir = Path.home() / '.config' / 'fan_control'
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / 'fan_control.conf'
+    """Get the path to the config file, returns None if directory can't be created"""
+    try:
+        config_dir = Path.home() / '.config' / 'fan_control'
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir / 'fan_control.conf'
+    except (OSError, PermissionError) as e:
+        # Can't create config directory, will use defaults only
+        return None
 
 
 def create_default_config():
@@ -965,8 +969,7 @@ history_size = 300
 
 
 def load_config():
-    """Load configuration from file"""
-    config_path = get_config_path()
+    """Load configuration from file, falls back to defaults if config unavailable"""
     default_config = {
         'interval': 2.0,
         'temp_min': 45.0,
@@ -978,6 +981,12 @@ def load_config():
         'hwmon_path': '/sys/class/hwmon/hwmon3'
     }
 
+    config_path = get_config_path()
+
+    # If we can't get a config path, just use defaults
+    if config_path is None:
+        return default_config
+
     if not config_path.exists():
         # Create default config file
         try:
@@ -985,7 +994,8 @@ def load_config():
                 f.write(create_default_config())
             print(f"Created default config file at {config_path}")
         except Exception as e:
-            print(f"Warning: Could not create config file: {e}")
+            # Silently fall back to defaults if we can't create the file
+            pass
         return default_config
 
     # Parse existing config
@@ -1011,7 +1021,8 @@ def load_config():
                     elif key == 'hwmon_path':
                         default_config[key] = value
     except Exception as e:
-        print(f"Warning: Could not load config file: {e}")
+        # Silently fall back to defaults if we can't read the file
+        pass
 
     return default_config
 
@@ -1019,6 +1030,11 @@ def load_config():
 def save_config(config):
     """Save configuration to file"""
     config_path = get_config_path()
+
+    if config_path is None:
+        print("Error: Cannot save config file (config directory not accessible)")
+        return False
+
     try:
         content = f"""# Fan Control Configuration
 # Lines starting with # are comments
