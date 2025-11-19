@@ -106,7 +106,7 @@ class FanController:
 
         # ANSI color codes
         self.COLOR_GREEN = '\033[92m'
-        self.COLOR_YELLOW = '\033[93m'
+        self.COLOR_YELLOW = '\033[38;5;208m'  # Orange - more visible on white background
         self.COLOR_RED = '\033[91m'
         self.COLOR_CYAN = '\033[96m'
         self.COLOR_RESET = '\033[0m'
